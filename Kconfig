@@ -1,0 +1,20 @@
+menu "Relay Channel Driver Configuration"
+
+    config RELAY_CHN_OPPOSITE_INERTIA_MS
+        int "Inertia time before it runs opposite direction (ms)"
+        range 200 1500
+        default 800
+        help
+            Time to wait after changing the direction of the output before
+            starting the output. This is useful for the motors or some other
+            mechanical actuators to allow them to stop and settle before
+            changing the direction.
+    
+    config RELAY_CHN_COUNT
+        int "Number of relay channels"
+        range 1 8
+        default 1
+        help
+            Number of relay channels between 1 and 8.
+    
+endmenu

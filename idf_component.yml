@@ -1,0 +1,7 @@
+name: relay_chn
+version: 0.1.0
+description: Custom component for relay channel control
+dependencies:
+  idf:
+    version: ">=4.0"
+# TODO: Repo ve belgelendirme bağlantılarını ekle.
