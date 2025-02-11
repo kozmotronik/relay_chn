@@ -1,8 +1,10 @@
+#include "driver/gpio.h"
 #include "unity.h"
+#include "unity_test_utils.h"
 #include "relay_chn.h"
 
 
-const gpip_num_t gpio_map[] = {GPIO_NUM_4, GPIO_NUM_5, GPIO_NUM_18, GPIO_NUM_19};
+const gpio_num_t gpio_map[] = {GPIO_NUM_4, GPIO_NUM_5, GPIO_NUM_18, GPIO_NUM_19};
 const uint8_t gpio_count = sizeof(gpio_map) / sizeof(gpio_map[0]);
 const uint8_t relay_chn_count = gpio_count / 2;
 
@@ -75,6 +77,15 @@ TEST_CASE("Relay channels do not change state for invalid channel", "[relay_chn]
 }
 
 
+void setUp(void)
+{
+    // Run before each test
+}
+
+void tearDown(void)
+{
+    // Run after each test
+}
 
 // Test app entry point
 void app_main(void) 
