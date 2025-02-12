@@ -100,3 +100,8 @@ CTestTestfile.cmake
 _deps
 CMakeUserPresets.json
 
+# Build directory
+build
+
+# unity-app directory
+unity-app
