@@ -28,6 +28,8 @@
 extern "C" {
 #endif
 
+#define RELAY_CHN_ID_ALL   CONFIG_RELAY_CHN_COUNT ///< Special ID to address all channels
+
 /**
  * @brief Enumeration for relay channel direction.
  */

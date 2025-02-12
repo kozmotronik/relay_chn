@@ -28,7 +28,7 @@
 #define RELAY_CHN_OPPOSITE_INERTIA_MS CONFIG_RELAY_CHN_OPPOSITE_INERTIA_MS
 #define RELAY_CHN_COUNT CONFIG_RELAY_CHN_COUNT
 
-const char* TAG = "relay_chn";
+static const char *TAG = "relay_chn";
 
 ESP_EVENT_DEFINE_BASE(RELAY_CHN_CMD_EVENT);
 
@@ -260,7 +260,7 @@ esp_err_t relay_chn_create(const gpio_num_t* gpio_map, uint8_t gpio_count)
  */
 static bool relay_chn_is_channel_id_valid(uint8_t chn_id)
 {
-    bool valid = chn_id >= 0 && chn_id < RELAY_CHN_COUNT;
+    bool valid = (chn_id >= 0 && chn_id < RELAY_CHN_COUNT) || chn_id == RELAY_CHN_ID_ALL;
     if (!valid) {
         ESP_LOGE(TAG, "Invalid channel ID: %d", chn_id);
     }
@@ -424,9 +424,21 @@ char *relay_chn_get_state_str(uint8_t chn_id)
     }
 }
 
+static void relay_chn_issue_cmd_on_all_channels(relay_chn_cmd_t cmd)
+{
+    for (int i = 0; i < RELAY_CHN_COUNT; i++) {
+        relay_chn_issue_cmd(&relay_channels[i], cmd);
+    }
+}
+
 void relay_chn_run_forward(uint8_t chn_id)
 {
     if (!relay_chn_is_channel_id_valid(chn_id)) return;
+
+    if (chn_id == RELAY_CHN_ID_ALL) {
+        relay_chn_issue_cmd_on_all_channels(RELAY_CHN_CMD_FORWARD);
+        return;
+    }
 
     relay_chn_t* relay_chn = &relay_channels[chn_id];
     relay_chn_issue_cmd(relay_chn, RELAY_CHN_CMD_FORWARD);
@@ -436,6 +448,11 @@ void relay_chn_run_reverse(uint8_t chn_id)
 {
     if (!relay_chn_is_channel_id_valid(chn_id)) return;
 
+    if (chn_id == RELAY_CHN_ID_ALL) {
+        relay_chn_issue_cmd_on_all_channels(RELAY_CHN_CMD_REVERSE);
+        return;
+    }
+
     relay_chn_t* relay_chn = &relay_channels[chn_id];
     relay_chn_issue_cmd(relay_chn, RELAY_CHN_CMD_REVERSE);
 }
@@ -444,6 +461,11 @@ void relay_chn_stop(uint8_t chn_id)
 {
     if (!relay_chn_is_channel_id_valid(chn_id)) return;
 
+    if (chn_id == RELAY_CHN_ID_ALL) {
+        relay_chn_issue_cmd_on_all_channels(RELAY_CHN_CMD_STOP);
+        return;
+    }
+
     relay_chn_t* relay_chn = &relay_channels[chn_id];
     relay_chn_issue_cmd(relay_chn, RELAY_CHN_CMD_STOP);
 }
@@ -451,6 +473,11 @@ void relay_chn_stop(uint8_t chn_id)
 void relay_chn_flip_direction(uint8_t chn_id)
 {
     if (!relay_chn_is_channel_id_valid(chn_id)) return;
+
+    if (chn_id == RELAY_CHN_ID_ALL) {
+        relay_chn_issue_cmd_on_all_channels(RELAY_CHN_CMD_FLIP);
+        return;
+    }
 
     relay_chn_t* relay_chn = &relay_channels[chn_id];
     relay_chn_issue_cmd(relay_chn, RELAY_CHN_CMD_FLIP);    
