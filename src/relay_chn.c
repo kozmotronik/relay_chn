@@ -487,11 +487,7 @@ static void relay_chn_issue_cmd(relay_chn_t* relay_chn, relay_chn_cmd_t cmd)
             relay_chn_state_t new_state = cmd == RELAY_CHN_CMD_FORWARD 
                     ? RELAY_CHN_STATE_FORWARD_PENDING : RELAY_CHN_STATE_REVERSE_PENDING;
             relay_chn_update_state(relay_chn, new_state);
-<<<<<<< HEAD
-            relay_chn_start_timer(relay_chn, RELAY_CHN_OPPOSITE_INERTIA_MS);
-=======
             relay_chn_start_inertia_timer(relay_chn, RELAY_CHN_OPPOSITE_INERTIA_MS);
->>>>>>> 99c5f66 (Rename inertia timer to distinguish timers.)
             break;
 
         default: ESP_LOGD(TAG, "relay_chn_evaluate: Unknown relay channel state!");
@@ -644,11 +640,7 @@ void relay_chn_execute_free(relay_chn_t *relay_chn)
 {
     relay_chn->pending_cmd = RELAY_CHN_CMD_NONE;
     // Invalidate the channel's timer if it is active
-<<<<<<< HEAD
-    relay_chn_invalidate_timer(relay_chn);
-=======
     relay_chn_invalidate_inertia_timer(relay_chn);
->>>>>>> 99c5f66 (Rename inertia timer to distinguish timers.)
     relay_chn_update_state(relay_chn, RELAY_CHN_STATE_FREE);
 }
 
