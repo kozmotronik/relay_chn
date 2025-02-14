@@ -63,9 +63,12 @@ typedef enum relay_chn_state_enum relay_chn_state_t;
 
 /**
  * @brief Relay channel state change listener.
- * 
+ *
  * An optional interface to listen to the channel state change events.
- * 
+ * The listeners SHOULD be implemented as light functions and SHOULD NOT contain
+ * any blocking calls. Otherwise the relay_chn module would not function properly
+ * since it is designed as event driven.
+ *
  * @param chn_id The ID of the channel whose state has changed.
  * @param old_state The old state of the channel.
  * @param new_state The new state of the channel.

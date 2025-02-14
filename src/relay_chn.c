@@ -85,10 +85,12 @@ typedef struct relay_chn_type {
     esp_timer_handle_t inertia_timer;       ///< Timer to handle the opposite direction inertia time.
 } relay_chn_t;
 
-
+/**
+ * @brief Structure to manage the state change listeners. 
+ */
 struct relay_chn_state_listener_manager_type {
-    uint8_t listener_count;
-    relay_chn_state_listener_t *listeners;
+    uint8_t listener_count;                 ///< The number of registered listeners.
+    relay_chn_state_listener_t *listeners;  ///< The list that holds references to the registered listeners.
 } relay_chn_state_listener_manager;
 
 
