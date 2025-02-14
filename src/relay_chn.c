@@ -13,6 +13,7 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_task.h"
@@ -23,7 +24,6 @@
 #include "relay_chn.h"
 #include "sdkconfig.h"
 
-// TODO: on_state change API si ekle
 
 #define RELAY_CHN_OPPOSITE_INERTIA_MS CONFIG_RELAY_CHN_OPPOSITE_INERTIA_MS
 #define RELAY_CHN_COUNT CONFIG_RELAY_CHN_COUNT
@@ -82,8 +82,14 @@ typedef struct relay_chn_type {
     relay_chn_run_info_t run_info;  ///< Runtime information of the relay channel.
     relay_chn_output_t output;      ///< Output configuration of the relay channel.
     relay_chn_cmd_t pending_cmd;    ///< The command that is pending to be issued
-    esp_timer_handle_t timer;       ///< Timer to handle the opposite direction inertia time.
+    esp_timer_handle_t inertia_timer;       ///< Timer to handle the opposite direction inertia time.
 } relay_chn_t;
+
+
+struct relay_chn_state_listener_manager_type {
+    uint8_t listener_count;
+    relay_chn_state_listener_t *listeners;
+} relay_chn_state_listener_manager;
 
 
 static relay_chn_t relay_channels[RELAY_CHN_COUNT];
@@ -154,7 +160,7 @@ static esp_err_t relay_chn_init_timer(relay_chn_t *relay_chn)
         .arg = &relay_chn->id,
         .name = timer_name
     };
-    return esp_timer_create(&timer_args, &relay_chn->timer);
+    return esp_timer_create(&timer_args, &relay_chn->inertia_timer);
 }
 
 /**
@@ -248,7 +254,84 @@ esp_err_t relay_chn_create(const gpio_num_t* gpio_map, uint8_t gpio_count)
     // Create relay channel command event loop
     ret |= relay_chn_create_event_loop();
 
+    // Init the state listener manager
+    relay_chn_state_listener_manager.listeners = malloc(sizeof(relay_chn_state_listener_t*));
+    if (relay_chn_state_listener_manager.listeners == NULL) {
+        ESP_LOGE(TAG, "Failed to initialize memory for the listeners!");
+        ret = ESP_ERR_NO_MEM;
+    }
+
     return ret;
+}
+
+static int relay_chn_listener_index(relay_chn_state_listener_t listener)
+{
+    for (int i = 0; i < relay_chn_state_listener_manager.listener_count; i++) {
+        if (relay_chn_state_listener_manager.listeners[i] == listener) {
+            // This is the listener to unregister. Check if it is in the middle
+            ESP_LOGD(TAG, "relay_chn_listener_index: Listener %p; found at index %d.", listener, i);
+            return i;
+        }
+    }
+    return -1;
+}
+
+esp_err_t relay_chn_register_listener(relay_chn_state_listener_t listener)
+{
+    if (listener == NULL) {
+        ESP_LOGE(TAG, "relay_chn_register_listener: A NULL listener given.");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (relay_chn_listener_index(listener) > -1) {
+        ESP_LOGD(TAG, "relay_chn_register_listener: The listener %p is already registered.", listener);
+        return ESP_OK;
+    }
+
+    ESP_LOGD(TAG, "relay_chn_register_listener: Register listener: %p", listener);
+    relay_chn_state_listener_manager.listeners[relay_chn_state_listener_manager.listener_count] = listener;
+    // Update listener count
+    relay_chn_state_listener_manager.listener_count++;
+
+    return ESP_OK;
+}
+
+void relay_chn_unregister_listener(relay_chn_state_listener_t listener)
+{
+    if (listener == NULL) {
+        ESP_LOGD(TAG, "relay_chn_unregister_listener: A NULL listener given, nothing to do.");
+        return;
+    }
+    // Search the listener in the listeners list and get its index if exists
+    int i = relay_chn_listener_index(listener);
+    if (i == -1) {
+        ESP_LOGD(TAG, "relay_chn_unregister_listener: %p is not registered already.", listener);
+        return;
+    }
+
+    uint8_t max_index = relay_chn_state_listener_manager.listener_count - 1;
+    // Check whether the listener's index is in the middle
+    if (i == max_index) {
+        // free(&relay_chn_state_listener_manager.listeners[i]);
+        relay_chn_state_listener_manager.listeners[i] = NULL;
+    }
+    else {
+        // It is in the middle, so align the next elements in the list and then free the last empty pointer
+        // Align the next elements
+        uint8_t num_of_elements = max_index - i;
+        relay_chn_state_listener_t *pnext = NULL;
+        // (i + j): current index; (i + j + 1): next index
+        for (uint8_t j = 0; j < num_of_elements; j++) {
+            uint8_t current_index = i + j;
+            uint8_t next_index = current_index + 1;
+            pnext = &relay_chn_state_listener_manager.listeners[next_index];
+            relay_chn_state_listener_manager.listeners[current_index] = *pnext;
+        }
+        // free(&relay_chn_state_listener_manager.listeners[max_index]); // Free the last element
+        relay_chn_state_listener_manager.listeners[max_index] = NULL; // Free the last element
+    }
+    // Decrease listener count
+    relay_chn_state_listener_manager.listener_count--;
 }
 
 /**
@@ -282,8 +365,8 @@ static void relay_chn_dispatch_cmd(relay_chn_t *relay_chn, relay_chn_cmd_t cmd) 
 
 static esp_err_t relay_chn_invalidate_timer(relay_chn_t *relay_chn)
 {
-    if (esp_timer_is_active(relay_chn->timer)) {
-        return esp_timer_stop(relay_chn->timer);
+    if (esp_timer_is_active(relay_chn->inertia_timer)) {
+        return esp_timer_stop(relay_chn->inertia_timer);
     }
     return ESP_OK;
 }
@@ -292,7 +375,22 @@ static esp_err_t relay_chn_start_timer(relay_chn_t *relay_chn, uint32_t time_ms)
 {
     // Invalidate the channel's timer if it is active
     relay_chn_invalidate_timer(relay_chn);
-    return esp_timer_start_once(relay_chn->timer, time_ms * 1000);
+    return esp_timer_start_once(relay_chn->inertia_timer, time_ms * 1000);
+}
+
+static void relay_chn_update_state(relay_chn_t *relay_chn, relay_chn_state_t new_state)
+{
+    relay_chn_state_t old = relay_chn->state;
+    relay_chn->state = new_state;
+    for (uint8_t i = 0; i < relay_chn_state_listener_manager.listener_count; i++) {
+        relay_chn_state_listener_t listener = relay_chn_state_listener_manager.listeners[i];
+        if (listener == NULL) {
+            relay_chn_state_listener_manager.listener_count -= 1;
+            ESP_LOGD(TAG, "relay_chn_update_state: A listener is NULL at index: %u", i);
+        }
+        // Emit the state change to the listeners
+        listener(relay_chn->id, old, new_state);
+    }
 }
 
 /**
@@ -344,8 +442,8 @@ static void relay_chn_issue_cmd(relay_chn_t* relay_chn, relay_chn_cmd_t cmd)
             break;
         
         case RELAY_CHN_STATE_STOPPED:
-            if (relay_chn->run_info.last_run_cmd == cmd) {
-                // If the last run command is the same as the current command, run the command immediately
+            if (relay_chn->run_info.last_run_cmd == cmd || relay_chn->run_info.last_run_cmd == RELAY_CHN_CMD_NONE) {
+                // If this is the first run or the last run command is the same as the current command, run the command immediately
                 relay_chn_dispatch_cmd(relay_chn, cmd);
             }
             else {
@@ -355,9 +453,9 @@ static void relay_chn_issue_cmd(relay_chn_t* relay_chn, relay_chn_cmd_t cmd)
                 uint32_t inertia_time_ms = RELAY_CHN_OPPOSITE_INERTIA_MS - inertia_time_passed_ms;
                 if (inertia_time_ms > 0) {
                     relay_chn->pending_cmd = cmd;
-                    relay_chn->state = cmd == RELAY_CHN_CMD_FORWARD 
-                                                ? RELAY_CHN_STATE_FORWARD_PENDING
-                                                : RELAY_CHN_STATE_REVERSE_PENDING;
+                    relay_chn_state_t new_state = cmd == RELAY_CHN_CMD_FORWARD 
+                            ? RELAY_CHN_STATE_FORWARD_PENDING : RELAY_CHN_STATE_REVERSE_PENDING;
+                    relay_chn_update_state(relay_chn, new_state);
                     // If the time passed is less than the opposite inertia time, wait for the remaining time
                     relay_chn_start_timer(relay_chn, inertia_time_ms);
                 }
@@ -384,7 +482,9 @@ static void relay_chn_issue_cmd(relay_chn_t* relay_chn, relay_chn_cmd_t cmd)
 
             // If the last run command is different from the current command, wait for the opposite inertia time
             relay_chn->pending_cmd = cmd;
-            relay_chn->state = cmd == RELAY_CHN_CMD_FORWARD ? RELAY_CHN_STATE_FORWARD_PENDING : RELAY_CHN_STATE_REVERSE_PENDING;
+            relay_chn_state_t new_state = cmd == RELAY_CHN_CMD_FORWARD 
+                    ? RELAY_CHN_STATE_FORWARD_PENDING : RELAY_CHN_STATE_REVERSE_PENDING;
+            relay_chn_update_state(relay_chn, new_state);
             relay_chn_start_timer(relay_chn, RELAY_CHN_OPPOSITE_INERTIA_MS);
             break;
 
@@ -406,22 +506,7 @@ char *relay_chn_get_state_str(uint8_t chn_id)
     if (!relay_chn_is_channel_id_valid(chn_id)) {
         return "INVALID";
     }
-    switch (relay_channels[chn_id].state) {
-        case RELAY_CHN_STATE_FREE:
-            return "FREE";
-        case RELAY_CHN_STATE_STOPPED:
-            return "STOPPED";
-        case RELAY_CHN_STATE_FORWARD:
-            return "FORWARD";
-        case RELAY_CHN_STATE_REVERSE:
-            return "REVERSE";
-        case RELAY_CHN_STATE_FORWARD_PENDING:
-            return "FORWARD_PENDING";
-        case RELAY_CHN_STATE_REVERSE_PENDING:
-            return "REVERSE_PENDING";
-        default:
-            return "UNKNOWN";
-    }
+    return relay_chn_state_str(relay_channels[chn_id].state);
 }
 
 static void relay_chn_issue_cmd_on_all_channels(relay_chn_cmd_t cmd)
@@ -497,7 +582,7 @@ static void relay_chn_execute_stop(relay_chn_t *relay_chn)
 {
     gpio_set_level(relay_chn->output.forward_pin, 0);
     gpio_set_level(relay_chn->output.reverse_pin, 0);
-    relay_chn->state = RELAY_CHN_STATE_STOPPED;
+    relay_chn_update_state(relay_chn, RELAY_CHN_STATE_STOPPED);
     
     // If there is any pending command, cancel it since the STOP command is issued right after it
     relay_chn->pending_cmd = RELAY_CHN_CMD_NONE;
@@ -522,16 +607,16 @@ static void relay_chn_execute_forward(relay_chn_t *relay_chn)
 {
     gpio_set_level(relay_chn->output.reverse_pin, 0);
     gpio_set_level(relay_chn->output.forward_pin, 1);
-    relay_chn->state = RELAY_CHN_STATE_FORWARD;
     relay_chn->run_info.last_run_cmd = RELAY_CHN_CMD_FORWARD;
+    relay_chn_update_state(relay_chn, RELAY_CHN_STATE_FORWARD);
 }
 
 static void relay_chn_execute_reverse(relay_chn_t *relay_chn)
 {
     gpio_set_level(relay_chn->output.forward_pin, 0);
     gpio_set_level(relay_chn->output.reverse_pin, 1);
-    relay_chn->state = RELAY_CHN_STATE_REVERSE;
     relay_chn->run_info.last_run_cmd = RELAY_CHN_CMD_REVERSE;
+    relay_chn_update_state(relay_chn, RELAY_CHN_STATE_REVERSE);
 }
 
 static void relay_chn_execute_flip(relay_chn_t *relay_chn)
@@ -551,10 +636,10 @@ static void relay_chn_execute_flip(relay_chn_t *relay_chn)
 
 void relay_chn_execute_free(relay_chn_t *relay_chn)
 {
-    relay_chn->state = RELAY_CHN_STATE_FREE;
     relay_chn->pending_cmd = RELAY_CHN_CMD_NONE;
     // Invalidate the channel's timer if it is active
     relay_chn_invalidate_timer(relay_chn);
+    relay_chn_update_state(relay_chn, RELAY_CHN_STATE_FREE);
 }
 
 static void relay_chn_event_handler(void* handler_arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
@@ -599,6 +684,26 @@ static char *relay_chn_cmd_str(relay_chn_cmd_t cmd)
             return "FLIP";
         case RELAY_CHN_CMD_FREE:
             return "FREE";
+        default:
+            return "UNKNOWN";
+    }
+}
+
+char *relay_chn_state_str(relay_chn_state_t state)
+{
+    switch (state) {
+        case RELAY_CHN_STATE_FREE:
+            return "FREE";
+        case RELAY_CHN_STATE_STOPPED:
+            return "STOPPED";
+        case RELAY_CHN_STATE_FORWARD:
+            return "FORWARD";
+        case RELAY_CHN_STATE_REVERSE:
+            return "REVERSE";
+        case RELAY_CHN_STATE_FORWARD_PENDING:
+            return "FORWARD_PENDING";
+        case RELAY_CHN_STATE_REVERSE_PENDING:
+            return "REVERSE_PENDING";
         default:
             return "UNKNOWN";
     }

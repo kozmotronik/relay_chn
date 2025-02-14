@@ -23,6 +23,7 @@
 
 #include "esp_err.h"
 #include "driver/gpio.h"
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -60,6 +61,17 @@ enum relay_chn_state_enum {
  */
 typedef enum relay_chn_state_enum relay_chn_state_t;
 
+/**
+ * @brief Relay channel state change listener.
+ * 
+ * An optional interface to listen to the channel state change events.
+ * 
+ * @param chn_id The ID of the channel whose state has changed.
+ * @param old_state The old state of the channel.
+ * @param new_state The new state of the channel.
+ */
+typedef void (*relay_chn_state_listener_t)(uint8_t chn_id, relay_chn_state_t old_state, relay_chn_state_t new_state);
+
 
 /**
  * @brief Create and initialize relay channels.
@@ -75,6 +87,26 @@ typedef enum relay_chn_state_enum relay_chn_state_t;
  *     - ESP_FAIL: General failure
  */
 esp_err_t relay_chn_create(const gpio_num_t* gpio_map, uint8_t gpio_count);
+
+/**
+ * @brief Register a channel state change listener.
+ * 
+ * @param listener A function that implements relay_chn_state_listener_t interface.
+ *
+ * @return
+ *     - ESP_OK: Success
+ *     - ESP_ERR_INVALID_ARG: Invalid argument
+ *     - ESP_ERR_NO_MEM: No enough memory
+ *     - ESP_FAIL: General failure
+ */
+esp_err_t relay_chn_register_listener(relay_chn_state_listener_t listener);
+
+/**
+ * @brief Unregister a channel state change listener.
+ * 
+ * @param listener A function that implements relay_chn_state_listener_t interface.
+ */
+void relay_chn_unregister_listener(relay_chn_state_listener_t listener);
 
 /**
  * @brief Get the state of the specified relay channel.
@@ -101,6 +133,14 @@ relay_chn_state_t relay_chn_get_state(uint8_t chn_id);
  *         modified or freed by the caller.
  */
 char *relay_chn_get_state_str(uint8_t chn_id);
+
+/**
+ * @brief Return the text presentation of an state.
+ * 
+ * @param state A state with type of relay_chn_state_t.
+ * @return char* The text presentation of the state. "UNKNOWN" if the state is not known.
+ */
+char *relay_chn_state_str(relay_chn_state_t state);
 
 /**
  * @brief Runs the relay channel in the forward direction.
