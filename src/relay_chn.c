@@ -346,7 +346,7 @@ void relay_chn_unregister_listener(relay_chn_state_listener_t listener)
  */
 static bool relay_chn_is_channel_id_valid(uint8_t chn_id)
 {
-    bool valid = (chn_id >= 0 && chn_id < RELAY_CHN_COUNT) || chn_id == RELAY_CHN_ID_ALL;
+    bool valid = (chn_id < RELAY_CHN_COUNT) || chn_id == RELAY_CHN_ID_ALL;
     if (!valid) {
         ESP_LOGE(TAG, "Invalid channel ID: %d", chn_id);
     }
