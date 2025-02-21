@@ -212,8 +212,9 @@ esp_err_t relay_chn_create(const gpio_num_t* gpio_map, uint8_t gpio_count)
 
     esp_err_t ret;
     for (int i = 0; i < RELAY_CHN_COUNT; i++) {
-        gpio_num_t forward_pin = gpio_map[i];
-        gpio_num_t reverse_pin = gpio_map[i+1];
+        int gpio_index = i << 1; // gpio_index = i * 2
+        gpio_num_t forward_pin = gpio_map[gpio_index];
+        gpio_num_t reverse_pin = gpio_map[gpio_index + 1];
         // Check if the GPIOs are valid
         if (!relay_chn_is_gpio_valid(forward_pin)) {
             ESP_LOGE(TAG, "Invalid GPIO pin number: %d", forward_pin);
