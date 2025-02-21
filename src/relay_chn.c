@@ -244,7 +244,7 @@ esp_err_t relay_chn_create(const gpio_num_t* gpio_map, uint8_t gpio_count)
         relay_chn->output.forward_pin = forward_pin;
         relay_chn->output.reverse_pin = reverse_pin;
         relay_chn->output.direction = RELAY_CHN_DIRECTION_DEFAULT;
-        relay_chn->state = RELAY_CHN_STATE_STOPPED;
+        relay_chn->state = RELAY_CHN_STATE_FREE;
         relay_chn->pending_cmd = RELAY_CHN_CMD_NONE;
         relay_chn->run_info.last_run_cmd = RELAY_CHN_CMD_NONE;
         ret |= relay_chn_init_timer(relay_chn);// Create direction change inertia timer
