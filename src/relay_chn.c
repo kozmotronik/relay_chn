@@ -447,7 +447,13 @@ static void relay_chn_issue_cmd(relay_chn_t* relay_chn, relay_chn_cmd_t cmd)
         
         case RELAY_CHN_STATE_STOPPED:
             if (relay_chn->run_info.last_run_cmd == cmd || relay_chn->run_info.last_run_cmd == RELAY_CHN_CMD_NONE) {
-                // If this is the first run or the last run command is the same as the current command, run the command immediately
+                // Since the state is STOPPED, the inertia timer should be running and must be invalidated
+                // with the pending FREE command
+                esp_timer_stop(relay_chn->inertia_timer);
+                relay_chn->pending_cmd = RELAY_CHN_CMD_NONE;
+                                
+                // If this is the first run or the last run command is the same as the current command,
+                // run the command immediately
                 relay_chn_dispatch_cmd(relay_chn, cmd);
             }
             else {
