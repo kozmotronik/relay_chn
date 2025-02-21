@@ -17,4 +17,13 @@ menu "Relay Channel Driver Configuration"
         help
             Number of relay channels between 1 and 8.
     
+    config RELAY_CHN_ENABLE_TILTING
+        bool "Enable tilting on relay channels"
+        default n
+        help
+            This option controls enabling tilting on channels. Tilting makes
+            a channel move with a specific pattern moving with small steps
+            at a time. Tilting is specifically designed for controlling some
+            types of curtains that need to be adjusted to let enter specific
+            amount of day light.
 endmenu
