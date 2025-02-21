@@ -180,7 +180,7 @@ static bool relay_chn_is_gpio_valid(gpio_num_t gpio)
 static esp_err_t relay_chn_create_event_loop()
 {
     esp_event_loop_args_t loop_args = {
-        .queue_size = 10,
+        .queue_size = RELAY_CHN_COUNT * 8,
         .task_name = "relay_chn_event_loop",
         .task_priority = ESP_TASKD_EVENT_PRIO - 1,
         .task_stack_size = 2048,
