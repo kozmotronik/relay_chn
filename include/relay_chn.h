@@ -54,6 +54,10 @@ enum relay_chn_state_enum {
     RELAY_CHN_STATE_REVERSE,    ///< The relay channel is running in the reverse direction.
     RELAY_CHN_STATE_FORWARD_PENDING,    ///< The relay channel is pending to run in the forward direction.
     RELAY_CHN_STATE_REVERSE_PENDING,    ///< The relay channel is pending to run in the reverse direction.
+#if CONFIG_RELAY_CHN_ENABLE_TILTING == 1
+    RELAY_CHN_STATE_TILT_FORWARD,    ///< The relay channel is tilting for forward.
+    RELAY_CHN_STATE_TILT_REVERSE,    ///< The relay channel is tilting for reverse.
+#endif
 };
 
 /**
@@ -197,6 +201,23 @@ void relay_chn_flip_direction(uint8_t chn_id);
  *         relay_chn_direction_t.
  */
 relay_chn_direction_t relay_chn_get_direction(uint8_t chn_id);
+
+
+#if CONFIG_RELAY_CHN_ENABLE_TILTING == 1
+
+void relay_chn_tilt_auto(uint8_t chn_id);
+
+void relay_chn_tilt_forward(uint8_t chn_id);
+
+void relay_chn_tilt_reverse(uint8_t chn_id);
+
+void relay_chn_tilt_stop(uint8_t chn_id);
+
+void relay_chn_tilt_sensitivity_set(uint8_t chn_id, uint8_t sensitivity);
+
+uint8_t relay_chn_tilt_sensitivity_get(uint8_t chn_id);
+
+#endif
 
 #ifdef __cplusplus
 }
