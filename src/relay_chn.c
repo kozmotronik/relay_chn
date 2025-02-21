@@ -366,19 +366,20 @@ static void relay_chn_dispatch_cmd(relay_chn_t *relay_chn, relay_chn_cmd_t cmd) 
                         sizeof(relay_chn->id), portMAX_DELAY);
 }
 
-static esp_err_t relay_chn_invalidate_inertia_timer(relay_chn_t *relay_chn)
-{
-    if (esp_timer_is_active(relay_chn->inertia_timer)) {
-        return esp_timer_stop(relay_chn->inertia_timer);
-    }
-    return ESP_OK;
-}
 
-static esp_err_t relay_chn_start_inertia_timer(relay_chn_t *relay_chn, uint32_t time_ms)
+static esp_err_t relay_chn_start_esp_timer_once(esp_timer_handle_t esp_timer, uint32_t time_ms)
 {
     // Invalidate the channel's timer if it is active
-    relay_chn_invalidate_inertia_timer(relay_chn);
-    return esp_timer_start_once(relay_chn->inertia_timer, time_ms * 1000);
+    esp_err_t ret = esp_timer_start_once(esp_timer, time_ms * 1000);
+    if (ret == ESP_ERR_INVALID_STATE) {
+        // This timer is already running, stop the timer first
+        ret = esp_timer_stop(esp_timer);
+        if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+            return ret;
+        }
+        ret = esp_timer_start_once(esp_timer, time_ms * 1000);
+    }
+    return ESP_OK;
 }
 
 static void relay_chn_update_state(relay_chn_t *relay_chn, relay_chn_state_t new_state)
@@ -460,7 +461,7 @@ static void relay_chn_issue_cmd(relay_chn_t* relay_chn, relay_chn_cmd_t cmd)
                             ? RELAY_CHN_STATE_FORWARD_PENDING : RELAY_CHN_STATE_REVERSE_PENDING;
                     relay_chn_update_state(relay_chn, new_state);
                     // If the time passed is less than the opposite inertia time, wait for the remaining time
-                    relay_chn_start_inertia_timer(relay_chn, inertia_time_ms);
+                    relay_chn_start_esp_timer_once(relay_chn->inertia_timer, inertia_time_ms);
                 }
                 else {
                     // If the time passed is more than the opposite inertia time, run the command immediately
@@ -488,7 +489,7 @@ static void relay_chn_issue_cmd(relay_chn_t* relay_chn, relay_chn_cmd_t cmd)
             relay_chn_state_t new_state = cmd == RELAY_CHN_CMD_FORWARD 
                     ? RELAY_CHN_STATE_FORWARD_PENDING : RELAY_CHN_STATE_REVERSE_PENDING;
             relay_chn_update_state(relay_chn, new_state);
-            relay_chn_start_inertia_timer(relay_chn, RELAY_CHN_OPPOSITE_INERTIA_MS);
+            relay_chn_start_esp_timer_once(relay_chn->inertia_timer, RELAY_CHN_OPPOSITE_INERTIA_MS);
             break;
 
         default: ESP_LOGD(TAG, "relay_chn_evaluate: Unknown relay channel state!");
@@ -590,7 +591,7 @@ static void relay_chn_execute_stop(relay_chn_t *relay_chn)
     // If there is any pending command, cancel it since the STOP command is issued right after it
     relay_chn->pending_cmd = RELAY_CHN_CMD_NONE;
     // Invalidate the channel's timer if it is active
-    relay_chn_invalidate_inertia_timer(relay_chn);
+    esp_timer_stop(relay_chn->inertia_timer);
 
     // If the channel was running, schedule a free command for the channel
     relay_chn_cmd_t last_run_cmd = relay_chn->run_info.last_run_cmd;
@@ -599,7 +600,7 @@ static void relay_chn_execute_stop(relay_chn_t *relay_chn)
         relay_chn->run_info.last_run_cmd_time_ms = esp_timer_get_time() / 1000;
         // Schedule a free command for the channel
         relay_chn->pending_cmd = RELAY_CHN_CMD_FREE;
-        relay_chn_start_inertia_timer(relay_chn, RELAY_CHN_OPPOSITE_INERTIA_MS);
+        relay_chn_start_esp_timer_once(relay_chn->inertia_timer, RELAY_CHN_OPPOSITE_INERTIA_MS);
     } else {
         // If the channel was not running, issue a free command immediately
         relay_chn_dispatch_cmd(relay_chn, RELAY_CHN_CMD_FREE);
@@ -634,14 +635,14 @@ static void relay_chn_execute_flip(relay_chn_t *relay_chn)
                                     : RELAY_CHN_DIRECTION_DEFAULT;
     // Set an inertia on the channel to prevent any immediate movement
     relay_chn->pending_cmd = RELAY_CHN_CMD_FREE;
-    relay_chn_start_inertia_timer(relay_chn, RELAY_CHN_OPPOSITE_INERTIA_MS);
+    relay_chn_start_esp_timer_once(relay_chn->inertia_timer, RELAY_CHN_OPPOSITE_INERTIA_MS);
 }
 
 void relay_chn_execute_free(relay_chn_t *relay_chn)
 {
     relay_chn->pending_cmd = RELAY_CHN_CMD_NONE;
     // Invalidate the channel's timer if it is active
-    relay_chn_invalidate_inertia_timer(relay_chn);
+    esp_timer_stop(relay_chn->inertia_timer);
     relay_chn_update_state(relay_chn, RELAY_CHN_STATE_FREE);
 }
 
