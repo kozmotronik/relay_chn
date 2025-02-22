@@ -205,19 +205,69 @@ relay_chn_direction_t relay_chn_get_direction(uint8_t chn_id);
 
 #if CONFIG_RELAY_CHN_ENABLE_TILTING == 1
 
+/**
+ * @brief Enables automatic tilting for the specified relay channel.
+ *
+ * This function enables automatic tilting mode for the given relay channel.  The channel will automatically
+ * switch between forward and reverse tilting based on some internal sensing mechanism (not detailed here).  
+ * Requires appropriate hardware support and configuration.
+ *
+ * @param chn_id The ID of the relay channel to enable automatic tilting.
+ */
 void relay_chn_tilt_auto(uint8_t chn_id);
 
+/**
+ * @brief Tilts the specified relay channel forward.
+ *
+ * This function initiates a forward tilting action for the specified relay channel.  This is a manual tilting 
+ * operation, unlike `relay_chn_tilt_auto()`.
+ *
+ * @param chn_id The ID of the relay channel to tilt forward.
+ */
 void relay_chn_tilt_forward(uint8_t chn_id);
 
+/**
+ * @brief Tilts the specified relay channel reverse.
+ *
+ * This function initiates a reverse tilting action for the specified relay channel. This is a manual tilting
+ * operation, unlike `relay_chn_tilt_auto()`.
+ *
+ * @param chn_id The ID of the relay channel to tilt reverse.
+ */
 void relay_chn_tilt_reverse(uint8_t chn_id);
 
+/**
+ * @brief Stops the tilting action on the specified relay channel.
+ *
+ * This function stops any ongoing tilting action (automatic or manual) on the specified relay channel.
+ *
+ * @param chn_id The ID of the relay channel to stop tilting.
+ */
 void relay_chn_tilt_stop(uint8_t chn_id);
 
+/**
+ * @brief Sets the tilting sensitivity for the specified relay channel.
+ *
+ * This function sets the sensitivity for the automatic tilting mechanism. A higher sensitivity value
+ * typically means the channel will react more readily to tilting events.
+ *
+ * @param chn_id The ID of the relay channel to set the sensitivity for.
+ * @param sensitivity The sensitivity in percentage: 0 - 100%.
+ */
 void relay_chn_tilt_sensitivity_set(uint8_t chn_id, uint8_t sensitivity);
 
+/**
+ * @brief Gets the tilting sensitivity for the specified relay channel.
+ *
+ * This function retrieves the currently set sensitivity for the specified relay channel's automatic
+ * tilting mechanism.
+ *
+ * @param chn_id The ID of the relay channel to get the sensitivity for.
+ * @return The current sensitivity in percentage: 0 - 100%.
+ */
 uint8_t relay_chn_tilt_sensitivity_get(uint8_t chn_id);
 
-#endif
+#endif // CONFIG_RELAY_CHN_ENABLE_TILTING
 
 #ifdef __cplusplus
 }
