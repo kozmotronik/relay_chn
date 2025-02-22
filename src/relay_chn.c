@@ -582,11 +582,14 @@ static void relay_chn_issue_cmd(relay_chn_t* relay_chn, relay_chn_cmd_t cmd)
                 relay_chn_dispatch_cmd(relay_chn, cmd);
                 return;
             }
-
+            
             if (relay_chn->run_info.last_run_cmd == cmd) {
                 // If the last run command is the same as the current command, do nothing
                 return;
             }
+            
+            // Stop the channel first before the schedule
+            relay_chn_dispatch_cmd(relay_chn, RELAY_CHN_CMD_STOP);
 
             // If the last run command is different from the current command, wait for the opposite inertia time
             relay_chn->pending_cmd = cmd;
