@@ -1038,45 +1038,70 @@ static void relay_chn_set_tilt_timing_values(relay_chn_tilt_timing_t *tilt_timin
     tilt_timing->pause_time_ms = pause_time_ms;
 }
 
-void relay_chn_tilt_sensitivity_set(uint8_t chn_id, uint8_t sensitivity)
+static void _relay_chn_tilt_sensitivity_set(relay_chn_t *relay_chn, uint8_t sensitivity)
 {
-    if (!relay_chn_is_channel_id_valid(chn_id)) {
-        return;
-    }
-    relay_chn_t* relay_chn = &relay_channels[chn_id];
-
     if (sensitivity >= 100) {
         relay_chn_set_tilt_timing_values(&relay_chn->tilt_control.tilt_timing,
                                               100,
                                               RELAY_CHN_TILT_RUN_MAX_MS,
                                               RELAY_CHN_TILT_PAUSE_MAX_MS);
-        return;
     }
     else if (sensitivity == 0) {
         relay_chn_set_tilt_timing_values(&relay_chn->tilt_control.tilt_timing,
                                               0,
-                                              RELAY_CHN_TILT_RUN_MAX_MS,
-                                              RELAY_CHN_TILT_PAUSE_MAX_MS);
-        return;
+                                              RELAY_CHN_TILT_RUN_MIN_MS,
+                                              RELAY_CHN_TILT_PAUSE_MIN_MS);
     }
-    
-    // Compute the new timing values from the sensitivity percent value by using linear interpolation
-    uint32_t tilt_run_time_ms = 0, tilt_pause_time_ms = 0;
-    tilt_run_time_ms = RELAY_CHN_TILT_RUN_MIN_MS + (sensitivity * (RELAY_CHN_TILT_RUN_MAX_MS - RELAY_CHN_TILT_RUN_MIN_MS) / 100);
-    tilt_pause_time_ms = RELAY_CHN_TILT_PAUSE_MIN_MS + (sensitivity * (RELAY_CHN_TILT_PAUSE_MAX_MS - RELAY_CHN_TILT_PAUSE_MIN_MS) / 100);
-    relay_chn_set_tilt_timing_values(&relay_chn->tilt_control.tilt_timing,
+    else {
+        // Compute the new timing values from the sensitivity percent value by using linear interpolation
+        uint32_t tilt_run_time_ms = 0, tilt_pause_time_ms = 0;
+        tilt_run_time_ms = RELAY_CHN_TILT_RUN_MIN_MS + (sensitivity * (RELAY_CHN_TILT_RUN_MAX_MS - RELAY_CHN_TILT_RUN_MIN_MS) / 100);
+        tilt_pause_time_ms = RELAY_CHN_TILT_PAUSE_MIN_MS + (sensitivity * (RELAY_CHN_TILT_PAUSE_MAX_MS - RELAY_CHN_TILT_PAUSE_MIN_MS) / 100);
+        relay_chn_set_tilt_timing_values(&relay_chn->tilt_control.tilt_timing,
                                           sensitivity,
                                           tilt_run_time_ms,
                                           tilt_pause_time_ms);
+    }
 }
 
-uint8_t relay_chn_tilt_sensitivity_get(uint8_t chn_id)
+void relay_chn_tilt_sensitivity_set(uint8_t chn_id, uint8_t sensitivity)
 {
     if (!relay_chn_is_channel_id_valid(chn_id)) {
-        return 0;
+        return;
     }
-    relay_chn_t* relay_chn = &relay_channels[chn_id];
-    return relay_chn->tilt_control.tilt_timing.sensitivity;
+    
+    if (chn_id == RELAY_CHN_ID_ALL) {
+        for (int i = 0; i < RELAY_CHN_COUNT; i++) {
+            _relay_chn_tilt_sensitivity_set(&relay_channels[i], sensitivity);
+        }
+    }
+    else {
+        _relay_chn_tilt_sensitivity_set(&relay_channels[chn_id], sensitivity);
+    }
+}
+
+esp_err_t relay_chn_tilt_sensitivity_get(uint8_t chn_id, uint8_t *sensitivity, size_t length)
+{
+    if (!relay_chn_is_channel_id_valid(chn_id)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (sensitivity == NULL) {
+        ESP_LOGD(TAG, "relay_chn_tilt_sensitivity_get: sensitivity is NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (chn_id == RELAY_CHN_ID_ALL) {
+        if (length < RELAY_CHN_COUNT) {
+            ESP_LOGD(TAG, "relay_chn_tilt_sensitivity_get: length is too short to store all sensitivity values");
+            return ESP_ERR_INVALID_ARG;
+        }
+
+        for (int i = 0; i < RELAY_CHN_COUNT; i++) {
+            sensitivity[i] = relay_channels[i].tilt_control.tilt_timing.sensitivity;
+        }
+        return ESP_OK;
+    }
+    *sensitivity = relay_channels[chn_id].tilt_control.tilt_timing.sensitivity;
+    return ESP_OK;
 }
 
 static esp_err_t relay_chn_init_tilt_control(relay_chn_t *relay_chn)
