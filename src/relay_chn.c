@@ -142,11 +142,18 @@ typedef struct relay_chn_tilt_timing_struct {
     uint32_t pause_time_ms; ///< Pause time in milliseconds.
 } relay_chn_tilt_timing_t;
 
+/// @brief Tilt counter structure to manage tilt count.
+typedef struct relay_chn_tilt_counter_struct {
+    uint32_t tilt_forward_count;    ///< Tilt forward count.
+    uint32_t tilt_reverse_count;    ///< Tilt reverse count.
+} relay_chn_tilt_counter_t;
+
 /// @brief Tilt control structure to manage tilt operations.
 typedef struct relay_chn_tilt_control_struct {
     relay_chn_tilt_cmd_t cmd;       ///< The tilt command in process.
     relay_chn_tilt_step_t step;     ///< Current tilt step.
     relay_chn_tilt_timing_t tilt_timing;    ///< Tilt timing structure.
+    relay_chn_tilt_counter_t tilt_counter;  ///< Tilt counter structure.
     esp_timer_handle_t tilt_timer;          ///< Tilt timer handle.
 } relay_chn_tilt_control_t;
 
@@ -165,6 +172,7 @@ typedef struct relay_chn_type {
 
 static esp_err_t relay_chn_init_tilt_control(relay_chn_t *relay_chn);
 static esp_err_t relay_chn_tilt_init(void);
+static void relay_chn_tilt_count_reset(relay_chn_t *relay_chn);
 
 #endif // RELAY_CHN_ENABLE_TILTING
 
@@ -456,6 +464,13 @@ static void relay_chn_dispatch_cmd(relay_chn_t *relay_chn, relay_chn_cmd_t cmd) 
                         cmd,
                         &relay_chn->id,
                         sizeof(relay_chn->id), portMAX_DELAY);
+
+#if RELAY_CHN_ENABLE_TILTING == 1
+    // Reset the tilt counter when the command is either FORWARD or REVERSE
+    if (cmd == RELAY_CHN_CMD_FORWARD || cmd == RELAY_CHN_CMD_REVERSE) {
+        relay_chn_tilt_count_reset(relay_chn);
+    }
+#endif
 }
 
 static esp_err_t relay_chn_start_esp_timer_once(esp_timer_handle_t esp_timer, uint32_t time_ms)
@@ -1129,6 +1144,72 @@ esp_err_t relay_chn_tilt_sensitivity_get(uint8_t chn_id, uint8_t *sensitivity, s
     return ESP_OK;
 }
 
+static void relay_chn_tilt_count_reset(relay_chn_t *relay_chn)
+{
+    relay_chn->tilt_control.tilt_counter.tilt_forward_count = 0;
+    relay_chn->tilt_control.tilt_counter.tilt_reverse_count = 0;
+}
+
+/**
+ * @brief Update tilt count automatically and return the current value.
+ * 
+ * This helper function updates the relevant tilt count depending on the
+ * last run info and helps the tilt module in deciding whether the requested
+ * tilt should execute or not.
+ * This is useful to control reverse tilting particularly. For example:
+ *   - If the channel's last run was FORWARD and a TILT_FORWARD is requested,
+ *     then the tilt counter will count up on the 
+ *     relay_chn_tilt_counter_struct::tilt_forward_count and the function will
+ *     return the actual count.
+ *   - If the channel's last run was FORWARD and a TILT_REVERSE is requested,
+ *     then the relay_chn_tilt_counter_struct::tilt_forward_count will be checked
+ *     against zero first, and then it will count down and return the actual count
+ *     if it is greater than 0, else the function will return 0.
+ *   - If the tilt command is irrelevant then the function will return 0.
+ *   - If the last run is irrelevant then the function will return 0.
+ * 
+ * @param relay_chn The relay channel handle.
+ * @return uint32_t The actual value of the relevant counter.
+ * @return 0 if:
+ *           - related counter is already 0.
+ *           - tilt command is irrelevant.
+ *           - last run info is irrelevant.
+ */
+static uint32_t relay_chn_tilt_count_update(relay_chn_t *relay_chn)
+{
+    if (relay_chn->run_info.last_run_cmd == RELAY_CHN_CMD_FORWARD) {
+        if (relay_chn->tilt_control.cmd == RELAY_CHN_TILT_CMD_FORWARD) {
+            return ++relay_chn->tilt_control.tilt_counter.tilt_forward_count;
+        }
+        else if (relay_chn->tilt_control.cmd == RELAY_CHN_TILT_CMD_REVERSE) {
+            if (relay_chn->tilt_control.tilt_counter.tilt_forward_count > 0)
+                return --relay_chn->tilt_control.tilt_counter.tilt_forward_count;
+            else
+                return 0;
+        }
+        else {
+            relay_chn_tilt_count_reset(relay_chn);
+            return 0;
+        }
+    }
+    else if (relay_chn->run_info.last_run_cmd == RELAY_CHN_CMD_REVERSE) {
+        if (relay_chn->tilt_control.cmd == RELAY_CHN_TILT_CMD_REVERSE) {
+            return ++relay_chn->tilt_control.tilt_counter.tilt_reverse_count;
+        }
+        else if (relay_chn->tilt_control.cmd == RELAY_CHN_TILT_CMD_FORWARD) {
+            if (relay_chn->tilt_control.tilt_counter.tilt_reverse_count > 0)
+                return --relay_chn->tilt_control.tilt_counter.tilt_reverse_count;
+            else
+                return 0;
+        }
+        else {
+            relay_chn_tilt_count_reset(relay_chn);
+            return 0;
+        }
+    }
+    return 0;
+}
+
 static void relay_chn_tilt_execute_tilt_stop(relay_chn_t *relay_chn)
 {
     // Stop the channel's timer if active
@@ -1182,6 +1263,15 @@ static void relay_chn_tilt_execute_tilt_pause(relay_chn_t *relay_chn)
         relay_chn_dispatch_tilt_cmd(relay_chn, RELAY_CHN_TILT_CMD_STOP);
         return;
     }
+
+    // Update the tilt counter before the next move and expect the return value to be greater than 0
+    if (relay_chn_tilt_count_update(relay_chn) == 0) {
+        ESP_LOGD(TAG, "relay_chn_tilt_execute_tilt_stop: Relay channel cannot tilt anymore");
+        // Stop tilting since the tilting limit has been reached
+        relay_chn_dispatch_tilt_cmd(relay_chn, RELAY_CHN_TILT_CMD_STOP);
+        return;
+    }
+
     // Set the pause time timer
     relay_chn_start_esp_timer_once(relay_chn->tilt_control.tilt_timer,
                             relay_chn->tilt_control.tilt_timing.pause_time_ms);
@@ -1259,6 +1349,7 @@ static esp_err_t relay_chn_init_tilt_control(relay_chn_t *relay_chn)
     tilt_control->tilt_timing.sensitivity = RELAY_CHN_TILT_DEFAULT_SENSITIVITY;
     tilt_control->tilt_timing.move_time_ms = RELAY_CHN_TILT_DEFAULT_RUN_MS;
     tilt_control->tilt_timing.pause_time_ms = RELAY_CHN_TILT_DEFAULT_PAUSE_MS;
+    relay_chn_tilt_count_reset(relay_chn);
     
     // Create tilt timer for the channel
     char timer_name[32];
