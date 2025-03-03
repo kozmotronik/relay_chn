@@ -110,9 +110,13 @@ typedef struct relay_chn_type {
     * 100 / (RELAY_CHN_TILT_RUN_MAX_MS - RELAY_CHN_TILT_RUN_MIN_MS) )
 /// @}
 
+
+ESP_EVENT_DEFINE_BASE(RELAY_CHN_TILT_CMD_EVENT_BASE);
+
 /// @brief Tilt commands.
 enum relay_chn_tilt_cmd_enum {
     RELAY_CHN_TILT_CMD_NONE,    ///< No command.
+    RELAY_CHN_TILT_CMD_STOP,    ///< Tilt command stop.
     RELAY_CHN_TILT_CMD_FORWARD, ///< Tilt command for forward.
     RELAY_CHN_TILT_CMD_REVERSE  ///< Tilt command for reverse.
 };
@@ -122,9 +126,10 @@ typedef enum relay_chn_tilt_cmd_enum relay_chn_tilt_cmd_t;
 
 /// @brief Tilt steps.
 enum relay_chn_tilt_step_enum {
-    RELAY_CHN_TILT_STEP_NONE,   ///< No step.
-    RELAY_CHN_TILT_STEP_RUN,    ///< Run step. Tilt is either driving for forward or reverse.
-    RELAY_CHN_TILT_STEP_PAUSE   ///< Pause step. Tilt is paused.
+    RELAY_CHN_TILT_STEP_NONE,       ///< No step.
+    RELAY_CHN_TILT_STEP_PENDING,    ///< Pending step.
+    RELAY_CHN_TILT_STEP_MOVE,       ///< Move step. Tilt is driving either for forward or reverse.
+    RELAY_CHN_TILT_STEP_PAUSE       ///< Pause step. Tilt is paused.
 };
 
 /// @brief Alias for the enum relay_chn_tilt_step_enum.
@@ -132,16 +137,23 @@ typedef enum relay_chn_tilt_step_enum relay_chn_tilt_step_t;
 
 /// @brief Tilt timing structure to manage tilt pattern timing.
 typedef struct relay_chn_tilt_timing_struct {
-    uint8_t sensitivity;    ///< Tilt sensitivity in percent value (%).
-    uint32_t run_time_ms;   ///< Run time in milliseconds.
+    uint8_t sensitivity;    ///< Tilt sensitivity in percentage (%).
+    uint32_t move_time_ms;  ///< Move time in milliseconds.
     uint32_t pause_time_ms; ///< Pause time in milliseconds.
 } relay_chn_tilt_timing_t;
 
+/// @brief Tilt counter structure to manage tilt count.
+typedef struct relay_chn_tilt_counter_struct {
+    uint32_t tilt_forward_count;    ///< Tilt forward count.
+    uint32_t tilt_reverse_count;    ///< Tilt reverse count.
+} relay_chn_tilt_counter_t;
+
 /// @brief Tilt control structure to manage tilt operations.
 typedef struct relay_chn_tilt_control_struct {
-    relay_chn_tilt_cmd_t cmd;       ///< Current tilt command.
+    relay_chn_tilt_cmd_t cmd;       ///< The tilt command in process.
     relay_chn_tilt_step_t step;     ///< Current tilt step.
     relay_chn_tilt_timing_t tilt_timing;    ///< Tilt timing structure.
+    relay_chn_tilt_counter_t tilt_counter;  ///< Tilt counter structure.
     esp_timer_handle_t tilt_timer;          ///< Tilt timer handle.
 } relay_chn_tilt_control_t;
 
@@ -155,13 +167,12 @@ typedef struct relay_chn_type {
     relay_chn_output_t output;      ///< Output configuration of the relay channel.
     relay_chn_cmd_t pending_cmd;    ///< The command that is pending to be issued
     esp_timer_handle_t inertia_timer;       ///< Timer to handle the opposite direction inertia time.
-    relay_chn_tilt_control_t tilt_control;
+    relay_chn_tilt_control_t tilt_control;  ///< Tilt control block.
 } relay_chn_t;
 
 static esp_err_t relay_chn_init_tilt_control(relay_chn_t *relay_chn);
-static void relay_chn_tilt_state_handler(uint8_t chn_id, relay_chn_state_t old_state, relay_chn_state_t new_state);
-
-static uint32_t relay_chn_tilting_channels;
+static esp_err_t relay_chn_tilt_init(void);
+static void relay_chn_tilt_count_reset(relay_chn_t *relay_chn);
 
 #endif // RELAY_CHN_ENABLE_TILTING
 
@@ -338,12 +349,13 @@ esp_err_t relay_chn_create(const gpio_num_t* gpio_map, uint8_t gpio_count)
         }
     }
 
-#if RELAY_CHN_ENABLE_TILTING == 1
-    relay_chn_tilting_channels = 0;
-#endif
-
     // Create relay channel command event loop
     ret |= relay_chn_create_event_loop();
+
+#if RELAY_CHN_ENABLE_TILTING == 1
+    // Must call after the event loop is initialized
+    ret |= relay_chn_tilt_init(); // Initialize tilt feature
+#endif
 
     // Init the state listener manager
     relay_chn_state_listener_manager.listeners = malloc(sizeof(relay_chn_state_listener_t*));
@@ -452,6 +464,13 @@ static void relay_chn_dispatch_cmd(relay_chn_t *relay_chn, relay_chn_cmd_t cmd) 
                         cmd,
                         &relay_chn->id,
                         sizeof(relay_chn->id), portMAX_DELAY);
+
+#if RELAY_CHN_ENABLE_TILTING == 1
+    // Reset the tilt counter when the command is either FORWARD or REVERSE
+    if (cmd == RELAY_CHN_CMD_FORWARD || cmd == RELAY_CHN_CMD_REVERSE) {
+        relay_chn_tilt_count_reset(relay_chn);
+    }
+#endif
 }
 
 static esp_err_t relay_chn_start_esp_timer_once(esp_timer_handle_t esp_timer, uint32_t time_ms)
@@ -472,17 +491,6 @@ static void relay_chn_update_state(relay_chn_t *relay_chn, relay_chn_state_t new
 {
     relay_chn_state_t old = relay_chn->state;
     relay_chn->state = new_state;
-
-#if RELAY_CHN_ENABLE_TILTING == 1
-    if (relay_chn->tilt_control.cmd != RELAY_CHN_TILT_CMD_NONE) {
-        // The channel is tilting, pipe the internal state to the tilt state handler
-        // unless the state sent from the tilt module
-        if (relay_chn->state != RELAY_CHN_STATE_TILT_FORWARD && relay_chn->state != RELAY_CHN_STATE_TILT_REVERSE) {
-            relay_chn_tilt_state_handler(relay_chn->id, old, new_state);
-            return;
-        }
-    }
-#endif
 
     for (uint8_t i = 0; i < relay_chn_state_listener_manager.listener_count; i++) {
         relay_chn_state_listener_t listener = relay_chn_state_listener_manager.listeners[i];
@@ -688,47 +696,73 @@ relay_chn_direction_t relay_chn_get_direction(uint8_t chn_id)
 }
 /* relay_chn APIs */
 
+static esp_err_t relay_chn_output_stop(relay_chn_t *relay_chn)
+{
+    esp_err_t ret;
+    ret = gpio_set_level(relay_chn->output.forward_pin, 0);
+    ret |= gpio_set_level(relay_chn->output.reverse_pin, 0);
+    return ret;
+}
+
+static esp_err_t relay_chn_output_forward(relay_chn_t *relay_chn)
+{
+    esp_err_t ret;
+    ret = gpio_set_level(relay_chn->output.forward_pin, 1);
+    ret |= gpio_set_level(relay_chn->output.reverse_pin, 0);
+    return ret;
+}
+
+static esp_err_t relay_chn_output_reverse(relay_chn_t *relay_chn)
+{
+    esp_err_t ret;
+    ret = gpio_set_level(relay_chn->output.forward_pin, 0);
+    ret |= gpio_set_level(relay_chn->output.reverse_pin, 1);
+    return ret;
+}
 
 static void relay_chn_execute_stop(relay_chn_t *relay_chn)
 {
-    gpio_set_level(relay_chn->output.forward_pin, 0);
-    gpio_set_level(relay_chn->output.reverse_pin, 0);
+    if (relay_chn_output_stop(relay_chn) != ESP_OK) {
+        ESP_LOGE(TAG, "relay_chn_execute_stop: Failed to output stop for relay channel #%d!", relay_chn->id);
+    }
+    relay_chn_state_t previous_state = relay_chn->state;
     relay_chn_update_state(relay_chn, RELAY_CHN_STATE_STOPPED);
-    
-#if RELAY_CHN_ENABLE_TILTING == 1
-    // Just stop and update state if tilting is active
-    if (relay_chn->tilt_control.cmd != RELAY_CHN_TILT_CMD_NONE) return;
-#endif
+
     // If there is any pending command, cancel it since the STOP command is issued right after it
     relay_chn->pending_cmd = RELAY_CHN_CMD_NONE;
     // Invalidate the channel's timer if it is active
     esp_timer_stop(relay_chn->inertia_timer);
 
-    // If the channel was running, schedule a free command for the channel
-    if (relay_chn->run_info.last_run_cmd != RELAY_CHN_CMD_NONE) {
+    // Save the last run time only if the previous state was either STATE FORWARD
+    // or STATE_REVERSE. Then schedule a free command.
+    if (previous_state == RELAY_CHN_STATE_FORWARD || previous_state == RELAY_CHN_STATE_REVERSE) {
         // Record the command's last run time
         relay_chn->run_info.last_run_cmd_time_ms = esp_timer_get_time() / 1000;
         // Schedule a free command for the channel
         relay_chn->pending_cmd = RELAY_CHN_CMD_FREE;
         relay_chn_start_esp_timer_once(relay_chn->inertia_timer, RELAY_CHN_OPPOSITE_INERTIA_MS);
     } else {
-        // If the channel was not running, issue a free command immediately
+        // If the channel was not running one of the run or fwd, issue a free command immediately
         relay_chn_dispatch_cmd(relay_chn, RELAY_CHN_CMD_FREE);
     }
 }
 
 static void relay_chn_execute_forward(relay_chn_t *relay_chn)
 {
-    gpio_set_level(relay_chn->output.reverse_pin, 0);
-    gpio_set_level(relay_chn->output.forward_pin, 1);
+    if (relay_chn_output_forward(relay_chn) != ESP_OK) {
+        ESP_LOGE(TAG, "relay_chn_execute_forward: Failed to output forward for relay channel #%d!", relay_chn->id);
+        return;
+    }
     relay_chn->run_info.last_run_cmd = RELAY_CHN_CMD_FORWARD;
     relay_chn_update_state(relay_chn, RELAY_CHN_STATE_FORWARD);
 }
 
 static void relay_chn_execute_reverse(relay_chn_t *relay_chn)
 {
-    gpio_set_level(relay_chn->output.forward_pin, 0);
-    gpio_set_level(relay_chn->output.reverse_pin, 1);
+    if (relay_chn_output_reverse(relay_chn) != ESP_OK) {
+        ESP_LOGE(TAG, "relay_chn_execute_reverse: Failed to output reverse for relay channel #%d!", relay_chn->id);
+        return;
+    }
     relay_chn->run_info.last_run_cmd = RELAY_CHN_CMD_REVERSE;
     relay_chn_update_state(relay_chn, RELAY_CHN_STATE_REVERSE);
 }
@@ -831,67 +865,50 @@ char *relay_chn_state_str(relay_chn_state_t state)
 
 #if RELAY_CHN_ENABLE_TILTING == 1
 
-// Timer callback for the relay_chn_tilt_control_t::tilt_timer
-static void relay_chn_tilt_timer_cb(void *arg)
+/**
+ * @brief Dispatch a tilt command to the relay channel event loop.
+ *
+ * @param relay_chn The relay channel to send the command to.
+ * @param cmd The tilt command.
+ * @return
+ *    - ESP_OK on success.
+ *    - ESP_ERR_INVALID_ARG if the command is none.
+ *    - Other error codes on failure.
+ */
+static esp_err_t relay_chn_dispatch_tilt_cmd(relay_chn_t *relay_chn, relay_chn_tilt_cmd_t cmd)
 {
-    uint8_t chn_id = *(uint8_t*) arg;
-    if (!relay_chn_is_channel_id_valid(chn_id)) {
-        ESP_LOGE(TAG, "relay_chn_tilt_timer_cb: Invalid relay channel ID!");
-        return;
-    }
-    relay_chn_t* relay_chn = &relay_channels[chn_id];
-    switch (relay_chn->tilt_control.step)
-    {
-        case RELAY_CHN_TILT_STEP_RUN:
-            relay_chn_issue_cmd(relay_chn, RELAY_CHN_CMD_STOP);
-            break;
-
-        case RELAY_CHN_TILT_STEP_PAUSE:
-            if (relay_chn->tilt_control.cmd == RELAY_CHN_TILT_CMD_FORWARD) {
-                relay_chn_issue_cmd(relay_chn, RELAY_CHN_CMD_REVERSE);
-            }
-            else if (relay_chn->tilt_control.cmd == RELAY_CHN_TILT_CMD_REVERSE) {
-                relay_chn_issue_cmd(relay_chn, RELAY_CHN_CMD_FORWARD);
-            }
-            break;
-        
-        default:
-            break;
-    }
+    if (cmd == RELAY_CHN_TILT_CMD_NONE) return ESP_ERR_INVALID_ARG;
+    return esp_event_post_to(relay_chn_event_loop,
+                            RELAY_CHN_TILT_CMD_EVENT_BASE,
+                            cmd,
+                            &relay_chn->id,
+                            sizeof(relay_chn->id), portMAX_DELAY);
 }
 
-// This listener is active until the relay_chn_tilt_stop() is called.
-static void relay_chn_tilt_state_handler(uint8_t chn_id, relay_chn_state_t old_state, relay_chn_state_t new_state)
+/**
+ * @brief Get the required timing before tilting depending on the last run.
+ *
+ * @param relay_chn the relay channel.
+ * @param cmd The tilt command.
+ * @return The time that is required in ms.
+ */
+static uint32_t relay_chn_get_required_timing_before_tilting(relay_chn_t *relay_chn, relay_chn_tilt_cmd_t cmd)
 {
-   ESP_LOGD(TAG, "relay_chn_tilt_state_listener: #%u, old_state: %s, new_state: %s",
-            chn_id, relay_chn_state_str(old_state), relay_chn_state_str(new_state));
+    if (cmd == RELAY_CHN_TILT_CMD_FORWARD && relay_chn->run_info.last_run_cmd == RELAY_CHN_CMD_REVERSE)
+        return 0;
+    else if (cmd == RELAY_CHN_TILT_CMD_REVERSE && relay_chn->run_info.last_run_cmd == RELAY_CHN_CMD_FORWARD)
+        return 0;
     
-    relay_chn_t* relay_chn = &relay_channels[chn_id];
-    // Check whether this channel is the one that's been tilting
-    if (relay_chn->tilt_control.cmd == RELAY_CHN_TILT_CMD_NONE) {
-        return;
-    }
-
-    switch (new_state)
-    {
-    case RELAY_CHN_STATE_FORWARD:
-    case RELAY_CHN_STATE_REVERSE:
-        relay_chn->tilt_control.step = RELAY_CHN_TILT_STEP_RUN;
-        // Start the tilt run timer
-        esp_timer_start_once(relay_chn->tilt_control.tilt_timer,
-                        relay_chn->tilt_control.tilt_timing.run_time_ms * 1000);
-        break;
-    case RELAY_CHN_STATE_STOPPED:
-        relay_chn->tilt_control.step = RELAY_CHN_TILT_STEP_PAUSE;
-        esp_timer_start_once(relay_chn->tilt_control.tilt_timer,
-                        relay_chn->tilt_control.tilt_timing.pause_time_ms * 1000);
-        break;
-
-    default:
-        break;
-    }
+    uint32_t inertia_time_passed_ms = (uint32_t) (esp_timer_get_time() / 1000) - relay_chn->run_info.last_run_cmd_time_ms;
+    return RELAY_CHN_OPPOSITE_INERTIA_MS - inertia_time_passed_ms;
 }
 
+/**
+ * @brief Issue a tilt command to a specific relay channel.
+ *
+ * @param chn_id The channel ID.
+ * @param cmd The tilt command.
+ */
 static void relay_chn_issue_tilt_cmd(uint8_t chn_id, relay_chn_tilt_cmd_t cmd)
 {
     relay_chn_t* relay_chn = &relay_channels[chn_id];
@@ -901,36 +918,70 @@ static void relay_chn_issue_tilt_cmd(uint8_t chn_id, relay_chn_tilt_cmd_t cmd)
         ESP_LOGD(TAG, "relay_chn_issue_tilt_cmd: Tilt will not be executed since the channel hasn't been run yet");
         return;
     }
-    else if (relay_chn->run_info.last_run_cmd == RELAY_CHN_CMD_REVERSE && cmd == RELAY_CHN_TILT_CMD_FORWARD) {
-        ESP_LOGD(TAG, "relay_chn_issue_tilt_cmd: Invalid tilt command: TILT_FORWARD after the REVERSE command issued");
-        return;
-    }
-    else if (relay_chn->run_info.last_run_cmd == RELAY_CHN_CMD_FORWARD && cmd == RELAY_CHN_TILT_CMD_REVERSE) {
-        ESP_LOGD(TAG, "relay_chn_issue_tilt_cmd: Invalid tilt command: TILT_REVERSE after the FORWARD command issued");
-        return;
-    }
     
     if (relay_chn->tilt_control.cmd == cmd) {
         ESP_LOGD(TAG, "relay_chn_issue_tilt_cmd: There is already a tilt command in progress!");
         return;
     }
 
-    // Set tilt control parameters
+    // Set the command that will be processed
     relay_chn->tilt_control.cmd = cmd;
-    relay_chn->tilt_control.step = RELAY_CHN_TILT_STEP_NONE;
+    switch (relay_chn->state) {
+        case RELAY_CHN_STATE_FREE:
+            // Relay channel is free, tilt can be issued immediately
+            relay_chn_dispatch_tilt_cmd(relay_chn, cmd);
+            break;
+        
+        case RELAY_CHN_STATE_FORWARD_PENDING:
+        case RELAY_CHN_STATE_REVERSE_PENDING:
+            // Issue a stop command first so that the timer and pending cmd get cleared
+            relay_chn_dispatch_cmd(relay_chn, RELAY_CHN_CMD_STOP);
+            // break not put intentionally
+        case RELAY_CHN_STATE_STOPPED: {
+            // Check if channel needs timing before tilting
+            uint32_t req_timing_ms = relay_chn_get_required_timing_before_tilting(relay_chn, cmd);
+            if (req_timing_ms == 0) {
+                relay_chn_dispatch_tilt_cmd(relay_chn, cmd);
+            } else {
+                // Channel needs timing before running tilting action, schedule it
+                relay_chn->tilt_control.step = RELAY_CHN_TILT_STEP_PENDING;
+                relay_chn_start_esp_timer_once(relay_chn->tilt_control.tilt_timer, req_timing_ms);
+            }
+            break;
+        }
 
-    // Set channel tilting active flag
-    relay_chn_tilting_channels |= (1 << chn_id);
+        case RELAY_CHN_STATE_FORWARD:
+            if (cmd == RELAY_CHN_TILT_CMD_FORWARD) {
+                // Stop the running channel first
+                relay_chn_dispatch_cmd(relay_chn, RELAY_CHN_CMD_STOP);
+                // Schedule for tilting
+                relay_chn->tilt_control.step = RELAY_CHN_TILT_STEP_PENDING;
+                relay_chn_start_esp_timer_once(relay_chn->tilt_control.tilt_timer, RELAY_CHN_OPPOSITE_INERTIA_MS);
+            } else if (cmd == RELAY_CHN_TILT_CMD_REVERSE) {
+                // Stop the running channel first
+                relay_chn_dispatch_cmd(relay_chn, RELAY_CHN_CMD_STOP);
+                // If the tilt cmd is TILT_REVERSE then dispatch it immediately
+                relay_chn_dispatch_tilt_cmd(relay_chn, cmd);
+            }
+            break;
 
-    if (cmd == RELAY_CHN_TILT_CMD_FORWARD) {
-        relay_chn_issue_cmd(relay_chn, RELAY_CHN_CMD_REVERSE);
-        // Emit the tilt state change for the channel
-        relay_chn_update_state(relay_chn, RELAY_CHN_STATE_TILT_FORWARD);
-    }
-    else if (cmd == RELAY_CHN_TILT_CMD_REVERSE) {
-        relay_chn_issue_cmd(relay_chn, RELAY_CHN_CMD_FORWARD);
-        // Emit the tilt state change for the channel
-        relay_chn_update_state(relay_chn, RELAY_CHN_STATE_TILT_REVERSE);
+        case RELAY_CHN_STATE_REVERSE:
+            if (cmd == RELAY_CHN_TILT_CMD_REVERSE) {
+                // Stop the running channel first
+                relay_chn_dispatch_cmd(relay_chn, RELAY_CHN_CMD_STOP);
+                // Schedule for tilting
+                relay_chn->tilt_control.step = RELAY_CHN_TILT_STEP_PENDING;
+                relay_chn_start_esp_timer_once(relay_chn->tilt_control.tilt_timer, RELAY_CHN_OPPOSITE_INERTIA_MS);
+            } else if (cmd == RELAY_CHN_TILT_CMD_FORWARD) {
+                // Stop the running channel first
+                relay_chn_dispatch_cmd(relay_chn, RELAY_CHN_CMD_STOP);
+                // If the tilt cmd is TILT_FORWARD then dispatch it immediately
+                relay_chn_dispatch_tilt_cmd(relay_chn, cmd);
+            }
+            break;
+
+        default:
+            ESP_LOGD(TAG, "relay_chn_issue_tilt_cmd: Unexpected relay channel state: %s!", relay_chn_state_str(relay_chn->state));
     }
 }
 
@@ -944,10 +995,10 @@ static void relay_chn_issue_tilt_cmd_on_all_channels(relay_chn_tilt_cmd_t cmd)
 static void relay_chn_issue_tilt_auto(uint8_t chn_id)
 {
     relay_chn_t* relay_chn = &relay_channels[chn_id];
-    if (relay_chn->run_info.last_run_cmd == RELAY_CHN_CMD_FORWARD) {
+    if (relay_chn->run_info.last_run_cmd == RELAY_CHN_CMD_FORWARD || relay_chn->state == RELAY_CHN_STATE_FORWARD) {
         relay_chn_issue_tilt_cmd(chn_id, RELAY_CHN_TILT_CMD_FORWARD);
     }
-    else if (relay_chn->run_info.last_run_cmd == RELAY_CHN_CMD_REVERSE) {
+    else if (relay_chn->run_info.last_run_cmd == RELAY_CHN_CMD_REVERSE || relay_chn->state == RELAY_CHN_STATE_REVERSE) {
         relay_chn_issue_tilt_cmd(chn_id, RELAY_CHN_TILT_CMD_REVERSE);
     }
 }
@@ -989,19 +1040,15 @@ void relay_chn_tilt_reverse(uint8_t chn_id)
     else relay_chn_issue_tilt_cmd(chn_id, RELAY_CHN_TILT_CMD_REVERSE);
 }
 
-static void relay_chn_issue_tilt_stop(uint8_t chn_id)
+static void _relay_chn_tilt_stop(uint8_t chn_id)
 {
     relay_chn_t* relay_chn = &relay_channels[chn_id];
     if (relay_chn->tilt_control.cmd != RELAY_CHN_TILT_CMD_NONE) {
-        // Stop the channel's timer if active
-        esp_timer_stop(relay_chn->tilt_control.tilt_timer);
-        // Invalidate tilt cmd and step
-        relay_chn->tilt_control.cmd = RELAY_CHN_TILT_CMD_NONE;
-        relay_chn->tilt_control.step = RELAY_CHN_TILT_STEP_NONE;
-        // Unset channel tilting active flag
-        relay_chn_tilting_channels &= ~(1 << chn_id);
-        // Stop the channel
-        relay_chn_issue_cmd(relay_chn, RELAY_CHN_CMD_STOP);
+        esp_event_post_to(relay_chn_event_loop, 
+                          RELAY_CHN_TILT_CMD_EVENT_BASE,
+                            RELAY_CHN_TILT_CMD_STOP,
+                          &relay_chn->id,
+                     sizeof(relay_chn->id), portMAX_DELAY);
     }
 }
 
@@ -1010,21 +1057,14 @@ void relay_chn_tilt_stop(uint8_t chn_id)
     if (!relay_chn_is_channel_id_valid(chn_id)) {
         return;
     }
-
-    // Check whether there is an active tilting channel
-    if (!relay_chn_tilting_channels) {
-        // No active tilting channels, so nothing to do
-        return;
-    }
     
     if (chn_id == RELAY_CHN_ID_ALL) {
-        // Any channel executing tilt?
         for (int i = 0; i < RELAY_CHN_COUNT; i++) {
-            relay_chn_issue_tilt_stop(i);
+            _relay_chn_tilt_stop(i);
         }
     }
     else {
-        relay_chn_issue_tilt_stop(chn_id);
+        _relay_chn_tilt_stop(chn_id);
     }
 }
 
@@ -1034,8 +1074,34 @@ static void relay_chn_set_tilt_timing_values(relay_chn_tilt_timing_t *tilt_timin
                                              uint32_t pause_time_ms)
 {
     tilt_timing->sensitivity = sensitivity;
-    tilt_timing->run_time_ms = run_time_ms;
+    tilt_timing->move_time_ms = run_time_ms;
     tilt_timing->pause_time_ms = pause_time_ms;
+}
+
+static void _relay_chn_tilt_sensitivity_set(relay_chn_t *relay_chn, uint8_t sensitivity)
+{
+    if (sensitivity >= 100) {
+        relay_chn_set_tilt_timing_values(&relay_chn->tilt_control.tilt_timing,
+                                              100,
+                                              RELAY_CHN_TILT_RUN_MAX_MS,
+                                              RELAY_CHN_TILT_PAUSE_MAX_MS);
+    }
+    else if (sensitivity == 0) {
+        relay_chn_set_tilt_timing_values(&relay_chn->tilt_control.tilt_timing,
+                                              0,
+                                              RELAY_CHN_TILT_RUN_MIN_MS,
+                                              RELAY_CHN_TILT_PAUSE_MIN_MS);
+    }
+    else {
+        // Compute the new timing values from the sensitivity percent value by using linear interpolation
+        uint32_t tilt_run_time_ms = 0, tilt_pause_time_ms = 0;
+        tilt_run_time_ms = RELAY_CHN_TILT_RUN_MIN_MS + (sensitivity * (RELAY_CHN_TILT_RUN_MAX_MS - RELAY_CHN_TILT_RUN_MIN_MS) / 100);
+        tilt_pause_time_ms = RELAY_CHN_TILT_PAUSE_MIN_MS + (sensitivity * (RELAY_CHN_TILT_PAUSE_MAX_MS - RELAY_CHN_TILT_PAUSE_MIN_MS) / 100);
+        relay_chn_set_tilt_timing_values(&relay_chn->tilt_control.tilt_timing,
+                                          sensitivity,
+                                          tilt_run_time_ms,
+                                          tilt_pause_time_ms);
+    }
 }
 
 void relay_chn_tilt_sensitivity_set(uint8_t chn_id, uint8_t sensitivity)
@@ -1043,40 +1109,236 @@ void relay_chn_tilt_sensitivity_set(uint8_t chn_id, uint8_t sensitivity)
     if (!relay_chn_is_channel_id_valid(chn_id)) {
         return;
     }
-    relay_chn_t* relay_chn = &relay_channels[chn_id];
-
-    if (sensitivity >= 100) {
-        relay_chn_set_tilt_timing_values(&relay_chn->tilt_control.tilt_timing,
-                                              100,
-                                              RELAY_CHN_TILT_RUN_MAX_MS,
-                                              RELAY_CHN_TILT_PAUSE_MAX_MS);
-        return;
-    }
-    else if (sensitivity == 0) {
-        relay_chn_set_tilt_timing_values(&relay_chn->tilt_control.tilt_timing,
-                                              0,
-                                              RELAY_CHN_TILT_RUN_MAX_MS,
-                                              RELAY_CHN_TILT_PAUSE_MAX_MS);
-        return;
-    }
     
-    // Compute the new timing values from the sensitivity percent value by using linear interpolation
-    uint32_t tilt_run_time_ms = 0, tilt_pause_time_ms = 0;
-    tilt_run_time_ms = RELAY_CHN_TILT_RUN_MIN_MS + (sensitivity * (RELAY_CHN_TILT_RUN_MAX_MS - RELAY_CHN_TILT_RUN_MIN_MS) / 100);
-    tilt_pause_time_ms = RELAY_CHN_TILT_PAUSE_MIN_MS + (sensitivity * (RELAY_CHN_TILT_PAUSE_MAX_MS - RELAY_CHN_TILT_PAUSE_MIN_MS) / 100);
-    relay_chn_set_tilt_timing_values(&relay_chn->tilt_control.tilt_timing,
-                                          sensitivity,
-                                          tilt_run_time_ms,
-                                          tilt_pause_time_ms);
+    if (chn_id == RELAY_CHN_ID_ALL) {
+        for (int i = 0; i < RELAY_CHN_COUNT; i++) {
+            _relay_chn_tilt_sensitivity_set(&relay_channels[i], sensitivity);
+        }
+    }
+    else {
+        _relay_chn_tilt_sensitivity_set(&relay_channels[chn_id], sensitivity);
+    }
 }
 
-uint8_t relay_chn_tilt_sensitivity_get(uint8_t chn_id)
+esp_err_t relay_chn_tilt_sensitivity_get(uint8_t chn_id, uint8_t *sensitivity, size_t length)
 {
     if (!relay_chn_is_channel_id_valid(chn_id)) {
-        return 0;
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (sensitivity == NULL) {
+        ESP_LOGD(TAG, "relay_chn_tilt_sensitivity_get: sensitivity is NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (chn_id == RELAY_CHN_ID_ALL) {
+        if (length < RELAY_CHN_COUNT) {
+            ESP_LOGD(TAG, "relay_chn_tilt_sensitivity_get: length is too short to store all sensitivity values");
+            return ESP_ERR_INVALID_ARG;
+        }
+
+        for (int i = 0; i < RELAY_CHN_COUNT; i++) {
+            sensitivity[i] = relay_channels[i].tilt_control.tilt_timing.sensitivity;
+        }
+        return ESP_OK;
+    }
+    *sensitivity = relay_channels[chn_id].tilt_control.tilt_timing.sensitivity;
+    return ESP_OK;
+}
+
+static void relay_chn_tilt_count_reset(relay_chn_t *relay_chn)
+{
+    relay_chn->tilt_control.tilt_counter.tilt_forward_count = 0;
+    relay_chn->tilt_control.tilt_counter.tilt_reverse_count = 0;
+}
+
+/**
+ * @brief Update tilt count automatically and return the current value.
+ * 
+ * This helper function updates the relevant tilt count depending on the
+ * last run info and helps the tilt module in deciding whether the requested
+ * tilt should execute or not.
+ * This is useful to control reverse tilting particularly. For example:
+ *   - If the channel's last run was FORWARD and a TILT_FORWARD is requested,
+ *     then the tilt counter will count up on the 
+ *     relay_chn_tilt_counter_struct::tilt_forward_count and the function will
+ *     return the actual count.
+ *   - If the channel's last run was FORWARD and a TILT_REVERSE is requested,
+ *     then the relay_chn_tilt_counter_struct::tilt_forward_count will be checked
+ *     against zero first, and then it will count down and return the actual count
+ *     if it is greater than 0, else the function will return 0.
+ *   - If the tilt command is irrelevant then the function will return 0.
+ *   - If the last run is irrelevant then the function will return 0.
+ * 
+ * @param relay_chn The relay channel handle.
+ * @return uint32_t The actual value of the relevant counter.
+ * @return 0 if:
+ *           - related counter is already 0.
+ *           - tilt command is irrelevant.
+ *           - last run info is irrelevant.
+ */
+static uint32_t relay_chn_tilt_count_update(relay_chn_t *relay_chn)
+{
+    if (relay_chn->run_info.last_run_cmd == RELAY_CHN_CMD_FORWARD) {
+        if (relay_chn->tilt_control.cmd == RELAY_CHN_TILT_CMD_FORWARD) {
+            return ++relay_chn->tilt_control.tilt_counter.tilt_forward_count;
+        }
+        else if (relay_chn->tilt_control.cmd == RELAY_CHN_TILT_CMD_REVERSE) {
+            if (relay_chn->tilt_control.tilt_counter.tilt_forward_count > 0)
+                return --relay_chn->tilt_control.tilt_counter.tilt_forward_count;
+            else
+                return 0;
+        }
+        else {
+            relay_chn_tilt_count_reset(relay_chn);
+            return 0;
+        }
+    }
+    else if (relay_chn->run_info.last_run_cmd == RELAY_CHN_CMD_REVERSE) {
+        if (relay_chn->tilt_control.cmd == RELAY_CHN_TILT_CMD_REVERSE) {
+            return ++relay_chn->tilt_control.tilt_counter.tilt_reverse_count;
+        }
+        else if (relay_chn->tilt_control.cmd == RELAY_CHN_TILT_CMD_FORWARD) {
+            if (relay_chn->tilt_control.tilt_counter.tilt_reverse_count > 0)
+                return --relay_chn->tilt_control.tilt_counter.tilt_reverse_count;
+            else
+                return 0;
+        }
+        else {
+            relay_chn_tilt_count_reset(relay_chn);
+            return 0;
+        }
+    }
+    return 0;
+}
+
+static void relay_chn_tilt_execute_tilt_stop(relay_chn_t *relay_chn)
+{
+    // Stop the channel's timer if active
+    esp_timer_stop(relay_chn->tilt_control.tilt_timer);
+    // Invalidate tilt cmd and step
+    relay_chn->tilt_control.cmd = RELAY_CHN_TILT_CMD_NONE;
+    relay_chn->tilt_control.step = RELAY_CHN_TILT_STEP_NONE;
+    // Stop the channel
+    if (relay_chn_output_stop(relay_chn) != ESP_OK) {
+        ESP_LOGE(TAG, "relay_chn_tilt_execute_tilt_stop: Failed to output stop for relay channel #%d!", relay_chn->id);
+    }
+    relay_chn_dispatch_cmd(relay_chn, RELAY_CHN_CMD_STOP);
+}
+
+static void relay_chn_tilt_execute_tilt_forward(relay_chn_t *relay_chn)
+{
+    if (relay_chn_output_reverse(relay_chn) != ESP_OK) {
+        ESP_LOGE(TAG, "relay_chn_tilt_execute_tilt_forward: Failed to output reverse for relay channel #%d!", relay_chn->id);
+        // Stop tilting because of the error
+        relay_chn_dispatch_tilt_cmd(relay_chn, RELAY_CHN_TILT_CMD_STOP);
+        return;
+    }
+    // Set the move time timer
+    relay_chn_start_esp_timer_once(relay_chn->tilt_control.tilt_timer,
+                            relay_chn->tilt_control.tilt_timing.move_time_ms);
+    // Set to pause step
+    relay_chn->tilt_control.step = RELAY_CHN_TILT_STEP_PAUSE;
+}
+
+static void relay_chn_tilt_execute_tilt_reverse(relay_chn_t *relay_chn)
+{
+    if (relay_chn_output_forward(relay_chn) != ESP_OK) {
+        ESP_LOGE(TAG, "relay_chn_tilt_execute_tilt_reverse: Failed to output forward for relay channel #%d!", relay_chn->id);
+        // Stop tilting because of the error
+        relay_chn_dispatch_tilt_cmd(relay_chn, RELAY_CHN_TILT_CMD_STOP);
+        return;
+    }
+    // Set the move time timer
+    relay_chn_start_esp_timer_once(relay_chn->tilt_control.tilt_timer,
+                            relay_chn->tilt_control.tilt_timing.move_time_ms);
+    // Set to pause step
+    relay_chn->tilt_control.step = RELAY_CHN_TILT_STEP_PAUSE;
+}
+
+static void relay_chn_tilt_execute_tilt_pause(relay_chn_t *relay_chn)
+{
+    // Pause the channel
+    if (relay_chn_output_stop(relay_chn) != ESP_OK) {
+        ESP_LOGE(TAG, "relay_chn_tilt_execute_tilt_stop: Failed to output stop for relay channel #%d!", relay_chn->id);
+        // Stop tilting because of the error
+        relay_chn_dispatch_tilt_cmd(relay_chn, RELAY_CHN_TILT_CMD_STOP);
+        return;
+    }
+
+    // Update the tilt counter before the next move and expect the return value to be greater than 0
+    if (relay_chn_tilt_count_update(relay_chn) == 0) {
+        ESP_LOGD(TAG, "relay_chn_tilt_execute_tilt_stop: Relay channel cannot tilt anymore");
+        // Stop tilting since the tilting limit has been reached
+        relay_chn_dispatch_tilt_cmd(relay_chn, RELAY_CHN_TILT_CMD_STOP);
+        return;
+    }
+
+    // Set the pause time timer
+    relay_chn_start_esp_timer_once(relay_chn->tilt_control.tilt_timer,
+                            relay_chn->tilt_control.tilt_timing.pause_time_ms);
+    // Set to move step
+    relay_chn->tilt_control.step = RELAY_CHN_TILT_STEP_MOVE;
+}
+
+static void relay_chn_tilt_event_handler(void *handler_arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
+{
+    uint8_t chn_id = *(uint8_t*) event_data;
+    if (!relay_chn_is_channel_id_valid(chn_id)) {
+        return;
     }
     relay_chn_t* relay_chn = &relay_channels[chn_id];
-    return relay_chn->tilt_control.tilt_timing.sensitivity;
+    ESP_LOGD(TAG, "relay_chn_event_handler: Channel %d, Command: %s", relay_chn->id, relay_chn_cmd_str(event_id));
+    switch(event_id) {
+        case RELAY_CHN_TILT_CMD_STOP:
+            relay_chn_tilt_execute_tilt_stop(relay_chn);
+            break;
+        case RELAY_CHN_TILT_CMD_FORWARD:
+            relay_chn_tilt_execute_tilt_forward(relay_chn);
+            // Update channel state
+            relay_chn_update_state(relay_chn, RELAY_CHN_STATE_TILT_FORWARD);
+            break;
+        case RELAY_CHN_TILT_CMD_REVERSE:
+            relay_chn_tilt_execute_tilt_reverse(relay_chn);
+            // Update channel state
+            relay_chn_update_state(relay_chn, RELAY_CHN_STATE_TILT_REVERSE);
+            break;
+        default:
+            ESP_LOGW(TAG, "Unexpected relay channel tilt command: %ld!", event_id);
+    }
+}
+
+// Timer callback for the relay_chn_tilt_control_t::tilt_timer
+static void relay_chn_tilt_timer_cb(void *arg)
+{
+    uint8_t chn_id = *(uint8_t*) arg;
+    if (!relay_chn_is_channel_id_valid(chn_id)) {
+        ESP_LOGE(TAG, "relay_chn_tilt_timer_cb: Invalid relay channel ID!");
+        return;
+    }
+    relay_chn_t* relay_chn = &relay_channels[chn_id];
+    
+    switch (relay_chn->tilt_control.step)
+    {
+        case RELAY_CHN_TILT_STEP_MOVE:
+            if (relay_chn->tilt_control.cmd == RELAY_CHN_TILT_CMD_FORWARD) {
+                relay_chn_tilt_execute_tilt_forward(relay_chn);
+            }
+            else if (relay_chn->tilt_control.cmd == RELAY_CHN_TILT_CMD_REVERSE) {
+                relay_chn_tilt_execute_tilt_reverse(relay_chn);
+            }
+            break;
+
+        case RELAY_CHN_TILT_STEP_PAUSE:
+            relay_chn_tilt_execute_tilt_pause(relay_chn);
+            break;
+
+        case RELAY_CHN_TILT_STEP_PENDING:
+            // Just dispatch the pending tilt command
+            relay_chn_dispatch_tilt_cmd(relay_chn, relay_chn->tilt_control.cmd);
+            break;
+        
+        default:
+            break;
+    }
 }
 
 static esp_err_t relay_chn_init_tilt_control(relay_chn_t *relay_chn)
@@ -1085,8 +1347,9 @@ static esp_err_t relay_chn_init_tilt_control(relay_chn_t *relay_chn)
     tilt_control->cmd = RELAY_CHN_TILT_CMD_NONE;
     tilt_control->step = RELAY_CHN_TILT_STEP_NONE;
     tilt_control->tilt_timing.sensitivity = RELAY_CHN_TILT_DEFAULT_SENSITIVITY;
-    tilt_control->tilt_timing.run_time_ms = RELAY_CHN_TILT_DEFAULT_RUN_MS;
+    tilt_control->tilt_timing.move_time_ms = RELAY_CHN_TILT_DEFAULT_RUN_MS;
     tilt_control->tilt_timing.pause_time_ms = RELAY_CHN_TILT_DEFAULT_PAUSE_MS;
+    relay_chn_tilt_count_reset(relay_chn);
     
     // Create tilt timer for the channel
     char timer_name[32];
@@ -1097,6 +1360,17 @@ static esp_err_t relay_chn_init_tilt_control(relay_chn_t *relay_chn)
         .name = timer_name
     };
     return esp_timer_create(&timer_args, &relay_chn->tilt_control.tilt_timer);
+}
+
+// Should call once from relay_chn_init
+static esp_err_t relay_chn_tilt_init(void)
+{
+    esp_err_t ret;
+    ret = esp_event_handler_register_with(relay_chn_event_loop, 
+                                          RELAY_CHN_TILT_CMD_EVENT_BASE,
+                                            ESP_EVENT_ANY_ID,
+                                       relay_chn_tilt_event_handler, NULL);
+    return ret;
 }
 
 #endif // RELAY_CHN_ENABLE_TILTING

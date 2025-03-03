@@ -263,9 +263,13 @@ void relay_chn_tilt_sensitivity_set(uint8_t chn_id, uint8_t sensitivity);
  * tilting mechanism.
  *
  * @param chn_id The ID of the relay channel to get the sensitivity for.
- * @return The current sensitivity in percentage: 0 - 100%.
+ * @param sensitivity The pointer to the memory in to which the sensitivity values will be copied.
+ * @param length The length of the sensitvity memory.
+ * @return
+ *      - ESP_OK: Success
+ *      - ESP_ERR_INVALID_ARG: Invalid argument
  */
-uint8_t relay_chn_tilt_sensitivity_get(uint8_t chn_id);
+esp_err_t relay_chn_tilt_sensitivity_get(uint8_t chn_id, uint8_t *sensitivity, size_t length);
 
 #endif // CONFIG_RELAY_CHN_ENABLE_TILTING
 
