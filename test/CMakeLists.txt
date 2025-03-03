@@ -1,8 +1,3 @@
-# The following lines of boilerplate have to be in your project's CMakeLists
-# in this exact order for cmake to work correctly
-cmake_minimum_required(VERSION 3.5)
-
-set(EXTRA_COMPONENT_DIRS "$ENV{IDF_PATH}/tools/unit-test-app/components"
-                         "../../relay_chn")
-include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(relay_chn_test)
+idf_component_register(SRCS_DIRS "."
+                    PRIV_INCLUDE_DIRS "."
+                    PRIV_REQUIRES unity relay_chn)
