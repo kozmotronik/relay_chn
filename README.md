@@ -105,7 +105,7 @@ relay_chn_tilt_sensitivity_set(0, 90);
 
 // Get tilting sensitivity (channel 0, sensitivty as percentage)
 uint8_t sensitivity = relay_chn_tilt_sensitivity_get(0);
-
+```
 
 ## License
 
