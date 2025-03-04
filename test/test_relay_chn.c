@@ -75,21 +75,3 @@ TEST_CASE("Relay channels do not change state for invalid channel", "[relay_chn]
     relay_chn_flip_direction(relay_chn_count + 1); // Flip the direction
     check_channels_state_unchanged();
 }
-
-
-void setUp(void)
-{
-    // Run before each test
-}
-
-void tearDown(void)
-{
-    // Run after each test
-}
-
-// Test app entry point
-void app_main(void) 
-{
-    // Run the Unity tests menu
-    unity_run_menu();
-}
